@@ -1,733 +1,1368 @@
-from flask import Flask, request, redirect, session
-import sqlite3
-from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime
+from flask import Flask, render_template_string
 
 app = Flask(__name__)
-app.secret_key = "PARTO_2026"
-DB = "parto.db"
 
+HTML = r'''<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebGhost</title>
 
-def db():
-    x = sqlite3.connect(DB)
-    x.row_factory = sqlite3.Row
-    return x
+<style>
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
 
-
-def init_db():
-    x = db()
-
-    x.execute(
-        "CREATE TABLE IF NOT EXISTS users ("
-        "id INTEGER PRIMARY KEY,"
-        "username TEXT UNIQUE NOT NULL,"
-        "email TEXT UNIQUE,"
-        "password TEXT NOT NULL,"
-        "emoji TEXT DEFAULT '👤',"
-        "bio TEXT DEFAULT '',"
-        "admin INTEGER DEFAULT 0,"
-        "banned INTEGER DEFAULT 0)"
-    )
-
-    x.execute(
-        "CREATE TABLE IF NOT EXISTS rooms ("
-        "id INTEGER PRIMARY KEY,"
-        "name TEXT NOT NULL,"
-        "username TEXT UNIQUE NOT NULL,"
-        "kind TEXT NOT NULL,"
-        "owner TEXT NOT NULL,"
-        "emoji TEXT DEFAULT '👥',"
-        "bio TEXT DEFAULT '')"
-    )
-
-    x.execute(
-        "CREATE TABLE IF NOT EXISTS messages ("
-        "id INTEGER PRIMARY KEY,"
-        "room INTEGER,"
-        "room_id INTEGER,"
-        "username TEXT NOT NULL,"
-        "text TEXT NOT NULL,"
-        "created_at TEXT DEFAULT '',"
-        "created TEXT DEFAULT '',"
-        "reply INTEGER DEFAULT 0,"
-        "edited INTEGER DEFAULT 0)"
-    )
-
-    x.execute(
-        "CREATE TABLE IF NOT EXISTS private_messages ("
-        "id INTEGER PRIMARY KEY,"
-        "sender TEXT NOT NULL,"
-        "receiver TEXT NOT NULL,"
-        "text TEXT NOT NULL)"
-    )
-
-    # Safe migration: add missing columns without deleting old data.
-    def cols(table):
-        return {
-            row[1] for row in x.execute(
-                "PRAGMA table_info(" + table + ")"
-            ).fetchall()
-        }
-
-    mc = cols("messages")
-
-    if "room" not in mc:
-        x.execute("ALTER TABLE messages ADD COLUMN room INTEGER")
-    if "room_id" not in mc:
-        x.execute("ALTER TABLE messages ADD COLUMN room_id INTEGER")
-    if "created_at" not in mc:
-        x.execute(
-            "ALTER TABLE messages ADD COLUMN created_at TEXT DEFAULT ''"
-        )
-    if "created" not in mc:
-        x.execute(
-            "ALTER TABLE messages ADD COLUMN created TEXT DEFAULT ''"
-        )
-    if "reply" not in mc:
-        x.execute(
-            "ALTER TABLE messages ADD COLUMN reply INTEGER DEFAULT 0"
-        )
-    if "edited" not in mc:
-        x.execute(
-            "ALTER TABLE messages ADD COLUMN edited INTEGER DEFAULT 0"
-        )
-
-    # Copy old room references to the new field and vice versa.
-    x.execute(
-        "UPDATE messages SET room=room_id "
-        "WHERE room IS NULL AND room_id IS NOT NULL"
-    )
-    x.execute(
-        "UPDATE messages SET room_id=room "
-        "WHERE room_id IS NULL AND room IS NOT NULL"
-    )
-
-    now = datetime.now().isoformat(timespec="seconds")
-    x.execute(
-        "UPDATE messages SET created_at=? "
-        "WHERE created_at IS NULL OR created_at=''",
-        (now,)
-    )
-    x.execute(
-        "UPDATE messages SET created=created_at "
-        "WHERE created IS NULL OR created=''"
-    )
-
-    # Keep the default Parto account/channel.
-    if not x.execute(
-        "SELECT id FROM users WHERE username='parto'"
-    ).fetchone():
-        x.execute(
-            "INSERT INTO users "
-            "(username,email,password,emoji,bio,admin) "
-            "VALUES(?,?,?,?,?,?)",
-            ("parto", "parto@local",
-             generate_password_hash("123456"),
-             "⚡", "مدیر رسمی پرتو", 1)
-        )
-
-    if not x.execute(
-        "SELECT id FROM rooms WHERE username='parto'"
-    ).fetchone():
-        x.execute(
-            "INSERT INTO rooms "
-            "(name,username,kind,owner,emoji,bio) "
-            "VALUES(?,?,?,?,?,?)",
-            ("پرتو", "parto", "channel", "parto",
-             "⚡", "کانال رسمی پرتو")
-        )
-
-    x.commit()
-    x.close()
-    print("PARTO DATABASE MIGRATION OK")
-
-
-def me():
-    if "user" not in session:
-        return None
-    x = db()
-    u = x.execute(
-        "SELECT * FROM users WHERE username=?",
-        (session["user"],)
-    ).fetchone()
-    x.close()
-    return u
-
-
-
-ICONS = {
-    "send": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 3.8 10.2c-.8.3-.8 1.4 0 1.7l6.2 2.1 2.1 6.2c.3.8 1.4.8 1.7 0L21 3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m10 14 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
-    "reply": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8 4 12l5 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 12h9a5 5 0 0 1 5 5v1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
-    "edit": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16.5-.8 4.3 4.3-.8L19 8.5a2.1 2.1 0 0 0 0-3l-.5-.5a2.1 2.1 0 0 0-3 0L4 16.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m14 6 4 4" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>',
-    "delete": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-    "user": '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 20a7 7 0 0 1 14 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
-    "settings": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.4 3.5.7-1h3.8l.7 1 1.2.7 1.2-.2 2.7 2.7-.2 1.2.7 1.2 1 .7v3.8l-1 .7-.7 1.2.2 1.2-2.7 2.7-1.2-.2-1.2.7-.7 1h-3.8l-.7-1-1.2-.7-1.2.2-2.7-2.7.2-1.2-.7-1.2-1-.7V9.8l1-.7.7-1.2-.2-1.2 2.7-2.7 1.2.2 1.2-.7Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>',
-    "plus": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
-    "logout": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5v14h5M14 8l4 4-4 4M18 12H9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-    "admin": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.1 4.2 4.6.7-3.3 3.3.8 4.6-4.2-2.2-4.2 2.2.8-4.6-3.3-3.3 4.6-.7L12 3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 17v3h8v-3" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>',
-    "message": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H11l-4.5 3V17H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>',
-    "back": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 6-6 6 6 6M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+body{
+margin:0;
+background:#020204;
+color:#fff;
+font-family:Tahoma,Arial,sans-serif;
+overflow-x:hidden;
 }
 
-CSS = '\n*{box-sizing:border-box}\n:root{--bg:#070b14;--panel:#0d1422;--panel2:#111b2b;--line:#223047;\n--text:#f5f7fb;--muted:#8e9bb0;--accent:#7c5cff;--accent2:#00d4ff}\nhtml,body{margin:0;min-height:100%;background:\nradial-gradient(circle at 15% 0%,#17245a 0,transparent 32%),\nradial-gradient(circle at 100% 30%,#073e55 0,transparent 28%),var(--bg);\ncolor:var(--text);font-family:Tahoma,Arial,sans-serif;direction:rtl}\nbody{min-height:100vh}a{color:var(--text);text-decoration:none}\n.app{min-height:100vh;display:flex;overflow:hidden}\n.menu{width:88px;background:rgba(13,20,34,.82);backdrop-filter:blur(18px);\nborder-left:1px solid var(--line);overflow:auto;flex-shrink:0}\n.menu a{display:block;text-align:center;padding:14px 4px;color:#cbd5e7;\nborder-bottom:1px solid rgba(255,255,255,.04);font-size:12px}\n.menu a:hover{background:rgba(124,92,255,.15);color:#fff}\n.main{flex:1;display:flex;flex-direction:column;min-width:0;height:100vh}\n.head{padding:16px 18px;background:rgba(13,20,34,.78);backdrop-filter:blur(18px);\nborder-bottom:1px solid var(--line);font-size:18px;font-weight:bold}\n.msgs{flex:1;overflow:auto;padding:18px;scroll-behavior:smooth}\n.msg{background:rgba(17,27,43,.92);border:1px solid rgba(255,255,255,.05);\npadding:11px 13px;margin:9px 0;border-radius:17px;max-width:min(86%,560px);\nbox-shadow:0 8px 22px rgba(0,0,0,.12);line-height:1.8;word-wrap:break-word}\n.mine{margin-right:auto;background:linear-gradient(135deg,#263f7c,#29325f);\nborder-color:rgba(124,92,255,.3)}\n.send{display:flex;gap:8px;padding:10px;background:rgba(13,20,34,.9);\nborder-top:1px solid var(--line);backdrop-filter:blur(18px)}\n.send input{flex:1;margin:0!important;border-radius:24px!important}\n.send button{width:52px;height:46px;margin:0!important;border-radius:16px!important;display:flex;align-items:center;justify-content:center}.send button svg{width:22px;height:22px}\ninput,textarea,select,button{width:100%;padding:12px;margin:6px 0;border:1px solid transparent;\nborder-radius:12px;font:inherit}\ninput,textarea,select{background:#111c2d;color:#fff;outline:none}\ninput:focus,textarea:focus,select:focus{border-color:var(--accent)}\nbutton{background:linear-gradient(135deg,var(--accent),#5a7cff);color:white;font-weight:bold}\nbutton:hover{filter:brightness(1.1)}\n.box{width:92%;max-width:540px;margin:35px auto;background:rgba(13,20,34,.88);\nborder:1px solid var(--line);backdrop-filter:blur(20px);padding:24px;border-radius:24px;\nbox-shadow:0 20px 70px rgba(0,0,0,.35)}\n.card{background:#111c2d;border:1px solid var(--line);padding:12px;margin:8px 0;border-radius:15px}\n.avatar{font-size:64px;text-align:center;filter:drop-shadow(0 10px 25px rgba(124,92,255,.25))}\n.tick{background:linear-gradient(135deg,#ffd43b,#ffad1f);color:#16120a;\npadding:3px 8px;border-radius:20px;font-size:12px}\nh1,h2{margin-top:5px}\n
-.icon-btn,.icon-link{display:inline-flex;align-items:center;justify-content:center;gap:6px}
-.icon-btn svg,.icon-link svg,.menu svg{width:20px;height:20px;display:inline-block;vertical-align:middle}
-.action-bar{display:flex;align-items:center;gap:7px;margin-top:7px}
-.action-bar a{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:10px;background:rgba(255,255,255,.06);color:#dce5f5}
-.action-bar a:hover{background:rgba(124,92,255,.2);color:#fff}
-.menu a{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+body:before{
+content:"";
+position:fixed;
+inset:-30%;
+z-index:-3;
+background:
+radial-gradient(circle at 20% 20%,#7c3aed35,transparent 25%),
+radial-gradient(circle at 80% 80%,#2563eb25,transparent 25%),
+radial-gradient(circle,#9333ea18,transparent 40%);
+filter:blur(70px);
+animation:bg 10s infinite alternate;
+}
 
-@media(max-width:600px){.menu{width:72px}.menu a{padding:12px 2px;font-size:10px}\n.msgs{padding:10px}.msg{max-width:92%}.head{padding:13px}.box{margin:18px auto;padding:18px}}\n'
+@keyframes bg{
+from{transform:scale(1) rotate(0)}
+to{transform:scale(1.15) rotate(4deg)}
+}
+
+.grid{
+position:fixed;
+inset:0;
+z-index:-2;
+opacity:.12;
+background-image:
+linear-gradient(#fff1 1px,transparent 1px),
+linear-gradient(90deg,#fff1 1px,transparent 1px);
+background-size:55px 55px;
+transform:perspective(500px) rotateX(55deg) scale(2);
+transform-origin:center bottom;
+}
+
+/* NAV */
+
+nav{
+position:fixed;
+top:15px;
+left:4%;
+right:4%;
+height:65px;
+z-index:20;
+
+display:flex;
+align-items:center;
+justify-content:space-between;
+
+padding:0 20px;
+
+background:#07070bd9;
+border:1px solid #ffffff18;
+border-radius:20px;
+
+backdrop-filter:blur(20px);
+
+box-shadow:
+0 20px 70px #000,
+inset 0 1px #ffffff15;
+}
+
+.logo{
+font-size:21px;
+font-weight:900;
+letter-spacing:3px;
+}
+
+.logo span{color:#9b6cff}
+
+.nav{
+display:flex;
+align-items:center;
+gap:20px;
+}
+
+.nav a{
+color:#777;
+text-decoration:none;
+font-size:13px;
+}
+
+.nav a:hover{color:#fff}
+
+.lang{
+color:white;
+background:#ffffff08;
+border:1px solid #ffffff18;
+padding:9px 15px;
+border-radius:12px;
+cursor:pointer;
+}
+
+/* HERO */
+
+.hero{
+min-height:100vh;
+display:flex;
+align-items:center;
+justify-content:center;
+text-align:center;
+padding:130px 20px 80px;
+}
+
+.hero-inner{max-width:950px}
+
+.badge{
+display:inline-flex;
+gap:9px;
+align-items:center;
+padding:10px 17px;
+border:1px solid #ffffff18;
+border-radius:100px;
+background:#ffffff06;
+color:#888;
+font-size:12px;
+}
+
+.dot{
+width:7px;
+height:7px;
+border-radius:50%;
+background:#9b6cff;
+box-shadow:0 0 20px #9b6cff;
+}
+
+h1{
+font-size:clamp(55px,10vw,125px);
+line-height:.85;
+letter-spacing:-7px;
+margin:35px 0;
+font-weight:1000;
+}
+
+.gradient{
+background:linear-gradient(
+90deg,#fff,#c4b5fd,#8b5cf6,#6366f1,#fff
+);
+background-size:300%;
+-webkit-background-clip:text;
+color:transparent;
+animation:shine 6s linear infinite;
+}
+
+@keyframes shine{
+to{background-position:300%}
+}
+
+.hero p{
+color:#777;
+line-height:2;
+max-width:700px;
+margin:auto;
+}
+
+.buttons{
+display:flex;
+justify-content:center;
+gap:18px;
+flex-wrap:wrap;
+margin-top:40px;
+}
+
+/* BUTTON */
+
+.btn{
+display:inline-flex;
+align-items:center;
+justify-content:center;
+gap:10px;
+
+min-width:180px;
+padding:16px 23px;
+
+color:#fff;
+text-decoration:none;
+
+background:linear-gradient(145deg,#1c1723,#050507);
+
+border:1px solid #ffffff1c;
+border-radius:17px;
+
+box-shadow:
+0 8px 0 #14101a,
+0 25px 50px #000,
+inset 0 1px #ffffff25;
+
+transition:.15s;
+transform-style:preserve-3d;
+}
+
+.primary{
+background:linear-gradient(145deg,#a78bfa,#4c1d95);
+box-shadow:
+0 8px 0 #32146b,
+0 25px 55px #7c3aed55,
+inset 0 1px #ffffff66;
+}
+
+/* SECTION */
+
+section{
+padding:110px 6%;
+}
+
+.title{
+text-align:center;
+margin-bottom:55px;
+}
+
+.title h2{
+font-size:45px;
+margin:0 0 12px;
+}
+
+.title p{color:#666}
+
+/* CARDS */
+
+.cards{
+max-width:1200px;
+margin:auto;
+
+display:grid;
+grid-template-columns:
+repeat(auto-fit,minmax(250px,1fr));
+
+gap:25px;
+
+perspective:1500px;
+}
+
+.card{
+position:relative;
+
+min-height:350px;
+
+border-radius:30px;
+
+background:
+linear-gradient(145deg,#121218,#030305);
+
+border:1px solid #ffffff14;
+
+box-shadow:
+0 35px 90px #000,
+inset 0 1px #ffffff0d;
+
+overflow:hidden;
+
+cursor:pointer;
+
+transform-style:preserve-3d;
+
+transition:
+transform .22s cubic-bezier(.2,.8,.2,1),
+box-shadow .3s,
+border .3s;
+}
+
+.card:hover{
+box-shadow:
+0 45px 110px #000,
+0 0 50px #7c3aed22;
+}
+
+.card.open{
+border-color:#9b6cff66;
+}
+
+/* LIGHT */
+
+.light{
+position:absolute;
+
+width:260px;
+height:260px;
+
+border-radius:50%;
+
+background:#8b5cf6;
+
+filter:blur(90px);
+
+opacity:.12;
+
+pointer-events:none;
+
+transition:.2s;
+}
+
+/* CONTENT */
+
+.card-main{
+position:relative;
+z-index:2;
+padding:32px;
+
+transform:translateZ(45px);
+}
+
+.icon{
+width:70px;
+height:70px;
+
+display:flex;
+align-items:center;
+justify-content:center;
+
+font-size:28px;
+
+border-radius:20px;
+
+background:linear-gradient(145deg,#28183e,#070609);
+
+border:1px solid #ffffff20;
+
+box-shadow:
+0 10px 0 #0b0710,
+0 25px 40px #000,
+inset 0 1px #ffffff35;
+
+transition:.2s;
+}
+
+.card h3{
+font-size:23px;
+margin:25px 0 12px;
+}
+
+.card p{
+color:#777;
+line-height:1.9;
+}
+
+/*
+--------------------------------
+پایین کارت
+--------------------------------
+*/
+
+.open-zone{
+position:absolute;
+left:0;
+right:0;
+bottom:0;
+
+height:70px;
+
+display:flex;
+align-items:center;
+justify-content:center;
+
+z-index:5;
+
+color:#777;
+
+font-size:12px;
+
+background:
+linear-gradient(
+transparent,
+#050507ee
+);
+
+transition:.3s;
+}
+
+.open-zone span{
+padding:9px 15px;
+
+border:1px solid #ffffff12;
+border-radius:100px;
+
+background:#ffffff06;
+
+transition:.2s;
+}
+
+.card.open .open-zone{
+height:55px;
+}
+
+.card.open .open-zone span{
+transform:rotate(180deg);
+}
+
+/*
+--------------------------------
+DETAILS
+--------------------------------
+*/
+
+.details{
+position:absolute;
+
+left:0;
+right:0;
+bottom:0;
+
+z-index:4;
+
+padding:28px;
+
+background:
+linear-gradient(
+180deg,
+#08080cfa,
+#030305
+);
+
+border-top:1px solid #ffffff12;
+
+transform:translateY(105%);
+
+transition:
+transform .55s cubic-bezier(.2,.8,.2,1);
+
+box-shadow:0 -25px 60px #000;
+}
+
+.card.open .details{
+transform:translateY(0);
+}
+
+.details h4{
+margin:0 0 15px;
+font-size:19px;
+}
+
+.details p{
+font-size:13px;
+color:#777;
+line-height:1.9;
+margin:0 0 18px;
+}
+
+.detail-row{
+display:grid;
+grid-template-columns:1fr 1fr;
+gap:10px;
+margin-bottom:18px;
+}
+
+.info{
+padding:12px;
+
+background:#ffffff06;
+
+border:1px solid #ffffff10;
+border-radius:13px;
+}
+
+.info small{
+display:block;
+color:#555;
+margin-bottom:5px;
+}
+
+.info b{
+font-size:12px;
+}
+
+.details .btn{
+width:100%;
+min-width:0;
+padding:13px;
+}
+
+/* PROJECT */
+
+.project{
+max-width:1200px;
+margin:auto;
+padding:65px;
+
+position:relative;
+overflow:hidden;
+
+border-radius:40px;
+
+background:linear-gradient(135deg,#100b18,#030305);
+
+border:1px solid #ffffff15;
+
+box-shadow:0 45px 130px #000;
+}
+
+.project:after{
+content:"";
+
+position:absolute;
+
+width:400px;
+height:400px;
+
+right:-150px;
+top:-150px;
+
+border-radius:50%;
+
+background:#7c3aed;
+filter:blur(100px);
+
+opacity:.14;
+}
+
+.project-content{
+position:relative;
+z-index:2;
+max-width:700px;
+}
+
+.project h2{
+font-size:50px;
+margin:0 0 20px;
+}
+
+.project p{
+color:#777;
+line-height:2;
+}
+
+/* CTA */
+
+.cta{
+max-width:1000px;
+margin:auto;
+
+padding:90px 25px;
+
+text-align:center;
+
+border-radius:40px;
+
+background:
+radial-gradient(circle,#7c3aed18,transparent 60%),
+#050507;
+
+border:1px solid #ffffff15;
+
+box-shadow:0 45px 130px #000;
+}
+
+.cta h2{
+font-size:48px;
+margin:0 0 18px;
+}
+
+.cta p{
+color:#777;
+line-height:2;
+}
+
+/* FOOTER */
+
+footer{
+padding:65px 20px;
+text-align:center;
+color:#555;
+border-top:1px solid #ffffff0d;
+}
+
+footer b{color:#9b6cff}
+
+/* MOBILE */
+
+@media(max-width:650px){
+
+nav{
+left:10px;
+right:10px;
+}
+
+.nav a{display:none}
+
+h1{
+font-size:56px;
+letter-spacing:-4px;
+}
+
+section{
+padding:85px 20px;
+}
+
+.title h2,
+.project h2,
+.cta h2{
+font-size:35px;
+}
+
+.project{
+padding:35px 25px;
+}
+
+}
+
+/* CLICK ANIMATION */
+
+@keyframes press{
+0%{filter:brightness(1)}
+50%{filter:brightness(1.5)}
+100%{filter:brightness(1)}
+}
+
+.pressed{
+animation:press .25s ease;
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="grid"></div>
+
+<nav>
+
+<div class="logo">
+WEB<span>GHOST</span>
+</div>
+
+<div class="nav">
+
+<a href="#services"
+data-fa="خدمات"
+data-en="Services">
+خدمات
+</a>
+
+<a href="#projects"
+data-fa="پروژه‌ها"
+data-en="Projects">
+پروژه‌ها
+</a>
+
+<a href="#contact"
+data-fa="ارتباط"
+data-en="Contact">
+ارتباط
+</a>
+
+<button class="lang" onclick="toggleLanguage()">EN</button>
+
+</div>
+
+</nav>
 
 
-def page(html):
-    return (
-        "<meta name='viewport' "
-        "content='width=device-width,initial-scale=1'>"
-        "<style>" + CSS + "</style>" + html
-    )
+<!-- HERO -->
+
+<div class="hero">
+
+<div class="hero-inner">
+
+<div class="badge">
+
+<span class="dot"></span>
+
+<span
+data-fa="استودیو طراحی و توسعه وب"
+data-en="WEB DESIGN & DEVELOPMENT">
+استودیو طراحی و توسعه وب
+</span>
+
+</div>
+
+<h1>
+
+<span data-fa="ایده‌ات" data-en="Your">
+ایده‌ات
+</span>
+
+<br>
+
+<span
+class="gradient"
+data-fa="دیجیتال می‌شود."
+data-en="goes digital.">
+دیجیتال می‌شود.
+</span>
+
+</h1>
+
+<p
+data-fa="طراحی و توسعه وب‌سایت‌های مدرن، سریع و اختصاصی برای برندها و کسب‌وکارها."
+data-en="Modern, fast and custom websites for brands and businesses.">
+
+طراحی و توسعه وب‌سایت‌های مدرن،
+سریع و اختصاصی برای برندها و کسب‌وکارها.
+
+</p>
+
+<div class="buttons">
+
+<a class="btn primary"
+href="https://t.me/Circus_co"
+target="_blank">
+
+<span data-fa="شروع پروژه" data-en="Start Project">
+شروع پروژه
+</span>
+
+↗
+
+</a>
+
+<a class="btn" href="#services">
+
+<span data-fa="خدمات ما" data-en="Our Services">
+خدمات ما
+</span>
+
+↓
+
+</a>
+
+</div>
+
+</div>
+
+</div>
+
+
+<!-- SERVICES -->
+
+<section id="services">
+
+<div class="title">
+
+<h2
+data-fa="خدمات WebGhost"
+data-en="WebGhost Services">
+خدمات WebGhost
+</h2>
+
+<p
+data-fa="قسمت پایین کارت را بزن تا توضیحات باز شود؛ گوشه‌ها واکنش سه‌بعدی دارند."
+data-en="Tap the bottom to open details. Corners have a 3D reaction.">
+
+قسمت پایین کارت را بزن تا توضیحات باز شود؛
+گوشه‌ها واکنش سه‌بعدی دارند.
+
+</p>
+
+</div>
+
+
+<div class="cards">
+
+
+<!-- CARD 1 -->
+
+<div class="card">
+
+<div class="light"></div>
+
+<div class="card-main">
+
+<div class="icon">✦</div>
+
+<h3
+data-fa="طراحی سایت"
+data-en="Web Design">
+طراحی سایت
+</h3>
+
+<p
+data-fa="طراحی مدرن و اختصاصی برای وب‌سایت‌های حرفه‌ای."
+data-en="Modern custom design for professional websites.">
+طراحی مدرن و اختصاصی برای وب‌سایت‌های حرفه‌ای.
+</p>
+
+</div>
+
+<div class="open-zone">
+<span>⌄</span>
+</div>
+
+<div class="details">
+
+<h4
+data-fa="طراحی اختصاصی"
+data-en="Custom Design">
+طراحی اختصاصی
+</h4>
+
+<p
+data-fa="طراحی ریسپانسیو، مدرن و متناسب با برند شما."
+data-en="Responsive, modern design tailored to your brand.">
+طراحی ریسپانسیو، مدرن و متناسب با برند شما.
+</p>
+
+<div class="detail-row">
+
+<div class="info">
+<small>Type</small>
+<b>Custom</b>
+</div>
+
+<div class="info">
+<small>Responsive</small>
+<b>100%</b>
+</div>
+
+</div>
+
+<a class="btn primary"
+href="https://t.me/Circus_co"
+target="_blank">
+
+<span
+data-fa="سفارش طراحی"
+data-en="Order Design">
+سفارش طراحی
+</span>
+
+↗
+
+</a>
+
+</div>
+
+</div>
+
+
+<!-- CARD 2 -->
+
+<div class="card">
+
+<div class="light"></div>
+
+<div class="card-main">
+
+<div class="icon">⌘</div>
+
+<h3
+data-fa="توسعه وب"
+data-en="Web Development">
+توسعه وب
+</h3>
+
+<p
+data-fa="ساخت وب‌اپلیکیشن‌های سریع و قدرتمند."
+data-en="Fast and powerful web applications.">
+ساخت وب‌اپلیکیشن‌های سریع و قدرتمند.
+</p>
+
+</div>
+
+<div class="open-zone">
+<span>⌄</span>
+</div>
+
+<div class="details">
+
+<h4
+data-fa="توسعه حرفه‌ای"
+data-en="Professional Development">
+توسعه حرفه‌ای
+</h4>
+
+<p
+data-fa="ساخت پروژه‌های وب با تمرکز روی سرعت و تجربه کاربری."
+data-en="Web projects focused on speed and user experience.">
+ساخت پروژه‌های وب با تمرکز روی سرعت و تجربه کاربری.
+</p>
+
+<div class="detail-row">
+
+<div class="info">
+<small>Frontend</small>
+<b>HTML / CSS / JS</b>
+</div>
+
+<div class="info">
+<small>Performance</small>
+<b>Optimized</b>
+</div>
+
+</div>
+
+<a class="btn primary"
+href="https://t.me/Circus_co"
+target="_blank">
+
+<span
+data-fa="سفارش توسعه"
+data-en="Order Development">
+سفارش توسعه
+</span>
+
+↗
+
+</a>
+
+</div>
+
+</div>
+
+
+<!-- CARD 3 -->
+
+<div class="card">
+
+<div class="light"></div>
+
+<div class="card-main">
+
+<div class="icon">◇</div>
+
+<h3>UI / UX</h3>
+
+<p
+data-fa="رابط کاربری حرفه‌ای و تجربه کاربری روان."
+data-en="Premium interfaces and smooth user experiences.">
+رابط کاربری حرفه‌ای و تجربه کاربری روان.
+</p>
+
+</div>
+
+<div class="open-zone">
+<span>⌄</span>
+</div>
+
+<div class="details">
+
+<h4>Premium UI / UX</h4>
+
+<p
+data-fa="طراحی رابط‌های مدرن با تمرکز روی تجربه کاربری."
+data-en="Modern interfaces focused on user experience.">
+طراحی رابط‌های مدرن با تمرکز روی تجربه کاربری.
+</p>
+
+<div class="detail-row">
+
+<div class="info">
+<small>Style</small>
+<b>Premium</b>
+</div>
+
+<div class="info">
+<small>Design</small>
+<b>3D</b>
+</div>
+
+</div>
+
+<a class="btn primary"
+href="https://t.me/Circus_co"
+target="_blank">
+
+<span
+data-fa="سفارش UI / UX"
+data-en="Order UI / UX">
+سفارش UI / UX
+</span>
+
+↗
+
+</a>
+
+</div>
+
+</div>
+
+
+<!-- CARD 4 -->
+
+<div class="card">
+
+<div class="light"></div>
+
+<div class="card-main">
+
+<div class="icon">↗</div>
+
+<h3
+data-fa="فروشگاه آنلاین"
+data-en="E-Commerce">
+فروشگاه آنلاین
+</h3>
+
+<p
+data-fa="فروشگاه مدرن و حرفه‌ای برای کسب‌وکار شما."
+data-en="Modern online stores for your business.">
+فروشگاه مدرن و حرفه‌ای برای کسب‌وکار شما.
+</p>
+
+</div>
+
+<div class="open-zone">
+<span>⌄</span>
+</div>
+
+<div class="details">
+
+<h4
+data-fa="فروشگاه حرفه‌ای"
+data-en="Professional Store">
+فروشگاه حرفه‌ای
+</h4>
+
+<p
+data-fa="ساخت فروشگاه آنلاین مدرن و مناسب موبایل."
+data-en="Modern mobile-ready online stores.">
+ساخت فروشگاه آنلاین مدرن و مناسب موبایل.
+</p>
+
+<div class="detail-row">
+
+<div class="info">
+<small>Mobile</small>
+<b>Ready</b>
+</div>
+
+<div class="info">
+<small>Design</small>
+<b>Premium</b>
+</div>
+
+</div>
+
+<a class="btn primary"
+href="https://t.me/Circus_co"
+target="_blank">
+
+<span
+data-fa="ساخت فروشگاه"
+data-en="Build Store">
+ساخت فروشگاه
+</span>
+
+↗
+
+</a>
+
+</div>
+
+</div>
+
+</div>
+
+</section>
+
+
+<!-- PROJECT -->
+
+<section id="projects">
+
+<div class="project">
+
+<div class="project-content">
+
+<h2
+data-fa="ایده‌ات را به محصول تبدیل کن."
+data-en="Turn your idea into a product.">
+ایده‌ات را به محصول تبدیل کن.
+</h2>
+
+<p
+data-fa="از یک سایت ساده تا یک پلتفرم کامل، پروژه خود را با WebGhost شروع کنید."
+data-en="From a simple website to a complete platform, start with WebGhost.">
+از یک سایت ساده تا یک پلتفرم کامل،
+پروژه خود را با WebGhost شروع کنید.
+</p>
+
+<a class="btn primary"
+href="https://t.me/Circus_co"
+target="_blank">
+
+<span
+data-fa="ثبت سفارش"
+data-en="Request Project">
+ثبت سفارش
+</span>
+
+↗
+
+</a>
+
+</div>
+
+</div>
+
+</section>
+
+
+<!-- CONTACT -->
+
+<section id="contact">
+
+<div class="cta">
+
+<h2
+data-fa="آماده‌ای متفاوت بسازی؟"
+data-en="Ready to build different?">
+آماده‌ای متفاوت بسازی؟
+</h2>
+
+<p
+data-fa="برای سفارش طراحی و توسعه سایت با WebGhost در ارتباط باشید."
+data-en="Contact WebGhost to start your project.">
+برای سفارش طراحی و توسعه سایت با WebGhost در ارتباط باشید.
+</p>
+
+<a class="btn primary"
+href="https://t.me/Circus_co"
+target="_blank">
+
+<span
+data-fa="ارتباط با ما"
+data-en="Contact Us">
+ارتباط با ما
+</span>
+
+↗
+
+</a>
+
+</div>
+
+</section>
+
+
+<footer>
+
+<b>WEBGHOST</b>
+
+<br><br>
+
+Premium Digital Experiences · 2026
+
+</footer>
+
+
+<script>
+
+/* ==========================
+   CARD INTERACTION
+========================== */
+
+document.querySelectorAll(".card").forEach(card=>{
+
+const openZone=card.querySelector(".open-zone");
+const details=card.querySelector(".details");
+const light=card.querySelector(".light");
+
+
+/*
+--------------------------------
+پایین کارت = باز شدن توضیحات
+--------------------------------
+*/
+
+openZone.addEventListener("pointerdown",e=>{
+
+e.stopPropagation();
+
+card.classList.toggle("open");
+
+card.classList.add("pressed");
+
+setTimeout(()=>{
+card.classList.remove("pressed");
+},250);
+
+});
+
+
+/*
+--------------------------------
+گوشه کارت = 3D tilt
+--------------------------------
+*/
+
+card.addEventListener("pointerdown",e=>{
+
+if(e.target.closest(".open-zone")) return;
+if(e.target.closest(".details")) return;
+
+const r=card.getBoundingClientRect();
+
+const x=(e.clientX-r.left)/r.width-.5;
+const y=(e.clientY-r.top)/r.height-.5;
+
+const rx=-y*28;
+const ry=x*28;
+
+card.style.transition=
+"transform .12s cubic-bezier(.2,.8,.2,1)";
+
+card.style.transform=
+`perspective(1100px)
+rotateX(${rx}deg)
+rotateY(${ry}deg)
+translateZ(25px)
+scale(1.025)`;
+
+if(light){
+
+light.style.transform=
+`translate(${x*150}px,${y*150}px)`;
+
+light.style.opacity=".28";
+
+}
+
+setTimeout(()=>{
+
+card.style.transition=
+"transform .7s cubic-bezier(.2,.8,.2,1)";
+
+card.style.transform=
+"perspective(1100px) rotateX(0deg) rotateY(0deg) translateZ(0) scale(1)";
+
+if(light){
+light.style.opacity=".12";
+}
+
+},300);
+
+});
+
+
+/*
+--------------------------------
+موس = حرکت زنده 3D
+--------------------------------
+*/
+
+card.addEventListener("pointermove",e=>{
+
+if(e.pointerType==="touch") return;
+
+if(card.classList.contains("open")) return;
+
+const r=card.getBoundingClientRect();
+
+const x=(e.clientX-r.left)/r.width-.5;
+const y=(e.clientY-r.top)/r.height-.5;
+
+card.style.transform=
+`perspective(1100px)
+rotateX(${-y*12}deg)
+rotateY(${x*12}deg)
+translateY(-7px)`;
+
+if(light){
+
+light.style.transform=
+`translate(${x*100}px,${y*100}px)`;
+
+}
+
+});
+
+
+card.addEventListener("pointerleave",()=>{
+
+card.style.transition=
+"transform .6s cubic-bezier(.2,.8,.2,1)";
+
+card.style.transform=
+"perspective(1100px) rotateX(0deg) rotateY(0deg) translateY(0)";
+
+});
+
+});
+
+
+/* ==========================
+   BUTTON 3D
+========================== */
+
+document.querySelectorAll(".btn").forEach(btn=>{
+
+btn.addEventListener("pointermove",e=>{
+
+if(e.pointerType==="touch")return;
+
+const r=btn.getBoundingClientRect();
+
+const x=(e.clientX-r.left)/r.width-.5;
+const y=(e.clientY-r.top)/r.height-.5;
+
+btn.style.transform=
+`perspective(600px)
+rotateX(${-y*8}deg)
+rotateY(${x*8}deg)
+translateY(-5px)`;
+
+});
+
+btn.addEventListener("pointerleave",()=>{
+btn.style.transform="";
+});
+
+});
+
+
+/* ==========================
+   LANGUAGE
+========================== */
+
+let english=false;
+
+function toggleLanguage(){
+
+english=!english;
+
+document.documentElement.lang=
+english?"en":"fa";
+
+document.documentElement.dir=
+english?"ltr":"rtl";
+
+document.querySelector(".lang").textContent=
+english?"FA":"EN";
+
+document.querySelectorAll("[data-fa]").forEach(el=>{
+
+el.textContent=
+english
+?el.dataset.en
+:el.dataset.fa;
+
+});
+
+}
+
+</script>
+
+</body>
+</html>'''
 
 
 @app.route("/")
 def home():
-    if me():
-        return redirect("/chat")
-    return page("""
-    <div class="box">
-        <div class="avatar">⚡</div>
-        <h1>پرتو</h1>
-        <form method="post" action="/login">
-            <input name="email" placeholder="ایمیل" required>
-            <input name="password" type="password"
-                   placeholder="رمز عبور" required>
-            <button>ورود</button>
-        </form>
-        <a href="/register">ثبت‌نام</a>
-    </div>
-    """)
+    return render_template_string(HTML)
 
-
-@app.route("/register", methods=["GET", "POST"])
-def register():
-    if request.method == "GET":
-        return page("""
-        <div class="box">
-            <h2>ثبت‌نام</h2>
-            <form method="post">
-                <input name="username" placeholder="آیدی" required>
-                <input name="email" placeholder="ایمیل" required>
-                <input name="password" type="password"
-                       placeholder="رمز عبور" required>
-                <button>ساخت حساب</button>
-            </form>
-        </div>
-        """)
-    username = request.form["username"].strip()
-    email = request.form["email"].strip()
-    password = request.form["password"]
-    if len(username) < 3:
-        return "آیدی حداقل ۳ کاراکتر باشد."
-    if len(password) < 6:
-        return "رمز حداقل ۶ کاراکتر باشد."
-    x = db()
-    try:
-        x.execute(
-            "INSERT INTO users (username,email,password) "
-            "VALUES(?,?,?)",
-            (username, email, generate_password_hash(password))
-        )
-        x.commit()
-    except sqlite3.IntegrityError:
-        x.close()
-        return "آیدی یا ایمیل قبلاً استفاده شده."
-    x.close()
-    session["user"] = username
-    return redirect("/chat")
-
-
-@app.route("/login", methods=["POST"])
-def login():
-    x = db()
-    u = x.execute(
-        "SELECT * FROM users WHERE email=?",
-        (request.form["email"],)
-    ).fetchone()
-    x.close()
-    if not u:
-        return "کاربر پیدا نشد."
-    if u["banned"]:
-        return "حساب شما مسدود است."
-    if not check_password_hash(
-        u["password"], request.form["password"]
-    ):
-        return "رمز عبور اشتباه است."
-    session["user"] = u["username"]
-    return redirect("/chat")
-
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect("/")
-
-
-@app.route("/profile/<username>")
-def profile(username):
-    u = me()
-    if not u:
-        return redirect("/")
-    x = db()
-    target = x.execute(
-        "SELECT * FROM users WHERE username=?",
-        (username,)
-    ).fetchone()
-    x.close()
-    if not target:
-        return "کاربر پیدا نشد."
-    tick = "<span class='tick'>✓</span>" if target["admin"] else ""
-    edit = ""
-    if u["username"] == username:
-        edit = "<br><a class='icon-link' href='/editprofile'>" + ICONS["settings"] + " ویرایش پروفایل</a>"
-    return page(
-        "<div class='box'>"
-        "<div class='avatar'>" + target["emoji"] + "</div>"
-        "<h2>@" + target["username"] + " " + tick + "</h2>"
-        "<p>" + (target["bio"] or "بدون بیو") + "</p>"
-        "<a class='icon-link' href='/private/" + username + "'>" + ICONS["message"] + " پیام خصوصی</a>"
-        + edit + "<br><br><a href='/chat'>بازگشت</a>"
-        "</div>"
-    )
-
-
-@app.route("/editprofile", methods=["GET", "POST"])
-def editprofile():
-    u = me()
-    if not u:
-        return redirect("/")
-    if request.method == "GET":
-        return page("""
-        <div class="box">
-            <h2>👤 پروفایل</h2>
-            <form method="post">
-                <select name="emoji">
-                    <option>👤</option><option>👻</option>
-                    <option>😎</option><option>⚡</option>
-                    <option>💻</option><option>🕷️</option>
-                    <option>☠️</option><option>🤖</option>
-                    <option>🔥</option>
-                </select>
-                <textarea name="bio" placeholder="بیوگرافی"></textarea>
-                <button>ذخیره</button>
-            </form>
-        </div>
-        """)
-    x = db()
-    x.execute(
-        "UPDATE users SET emoji=?,bio=? WHERE username=?",
-        (request.form["emoji"], request.form["bio"][:200],
-         u["username"])
-    )
-    x.commit()
-    x.close()
-    return redirect("/profile/" + u["username"])
-
-
-@app.route("/private/<username>")
-def private(username):
-    u = me()
-    if not u:
-        return redirect("/")
-    x = db()
-    target = x.execute(
-        "SELECT * FROM users WHERE username=?",
-        (username,)
-    ).fetchone()
-    if not target:
-        x.close()
-        return "کاربر پیدا نشد."
-    messages = x.execute(
-        "SELECT * FROM private_messages "
-        "WHERE (sender=? AND receiver=?) "
-        "OR (sender=? AND receiver=?) ORDER BY id",
-        (u["username"], username, username, u["username"])
-    ).fetchall()
-    body = ""
-    for m in messages:
-        cls = "msg"
-        if m["sender"] == u["username"]:
-            cls += " mine"
-        body += (
-            "<div class='" + cls + "'><b>@" +
-            m["sender"] + "</b><br>" + m["text"] + "</div>"
-        )
-    x.close()
-    return page(
-        "<div class='app'><div class='main'>"
-        "<div class='head'>" + target["emoji"] +
-        " @" + target["username"] + "</div>"
-        "<div class='msgs'>" + body + "</div>"
-        "<form class='send' method='post' action='/private/" +
-        username + "/send'>"
-        "<input name='text' placeholder='پیام خصوصی...' required>"
-        "<button class='icon-btn' aria-label='ارسال'>" + ICONS["send"] + "</button></form></div></div>"
-    )
-
-
-@app.route("/private/<username>/send", methods=["POST"])
-def private_send(username):
-    u = me()
-    if not u:
-        return redirect("/")
-    x = db()
-    target = x.execute(
-        "SELECT id FROM users WHERE username=?",
-        (username,)
-    ).fetchone()
-    if not target:
-        x.close()
-        return "کاربر پیدا نشد."
-    x.execute(
-        "INSERT INTO private_messages "
-        "(sender,receiver,text) VALUES(?,?,?)",
-        (u["username"], username, request.form["text"][:2000])
-    )
-    x.commit()
-    x.close()
-    return redirect("/private/" + username)
-
-
-@app.route("/chat")
-def chat():
-    u = me()
-    if not u:
-        return redirect("/")
-    x = db()
-    rooms = x.execute(
-        "SELECT * FROM rooms ORDER BY id"
-    ).fetchall()
-    if not rooms:
-        x.close()
-        return "هیچ اتاقی وجود ندارد."
-    rid = request.args.get("room")
-    if rid:
-        room = x.execute(
-            "SELECT * FROM rooms WHERE id=?",
-            (rid,)
-        ).fetchone()
-    else:
-        room = rooms[0]
-    if not room:
-        x.close()
-        return "اتاق پیدا نشد."
-    messages = x.execute(
-        "SELECT * FROM messages WHERE room=? ORDER BY id",
-        (room["id"],)
-    ).fetchall()
-    menu = ""
-    for r in rooms:
-        menu += (
-            "<a href='/chat?room=" + str(r["id"]) + "'>" +
-            r["emoji"] + "<br>" + r["name"] + "</a>"
-        )
-    body = ""
-    for m in messages:
-        cls = "msg mine" if m["username"] == u["username"] else "msg"
-        reply_html = ""
-        if m["reply"]:
-            old = x.execute(
-                "SELECT username,text FROM messages WHERE id=?",
-                (m["reply"],)
-            ).fetchone()
-            if old:
-                reply_html = (
-                    "<div class='card'>↩️ @" +
-                    old["username"] + "<br>" + old["text"] +
-                    "</div>"
-                )
-        actions = (
-            "<a href='/reply/" + str(m["id"]) + "' aria-label='پاسخ'>" + ICONS["reply"] + "</a>"
-        )
-        if m["username"] == u["username"] or u["admin"]:
-            actions += (
-                " <a href='/edit/" + str(m["id"]) + "' aria-label='ویرایش'>" + ICONS["edit"] + "</a>"
-                " <a href='/delete/" + str(m["id"]) + "' aria-label='حذف'>" + ICONS["delete"] + "</a>"
-            )
-        body += (
-            "<div class='" + cls + "'>" + reply_html +
-            "<a href='/profile/" + m["username"] + "'>@" +
-            m["username"] + "</a><br>" + m["text"] +
-            "<br><div class='action-bar'>" + actions + "</div></div>"
-        )
-    form = ""
-    if room["kind"] == "group" or room["owner"] == u["username"]:
-        form = (
-            "<form class='send' method='post' action='/send/" +
-            str(room["id"]) + "'>"
-            "<input name='text' placeholder='پیام...' required>"
-            "<button class='icon-btn' aria-label='ارسال'>" + ICONS["send"] + "</button></form>"
-        )
-    admin = "<a href='/admin'>" + ICONS["admin"] + "<span>ادمین</span></a>" if u["admin"] else ""
-    html = (
-        "<div class='app'><div class='menu'>" + menu +
-        "<a href='/profile/" + u["username"] +
-        "'>👤<br>پروفایل</a>"
-        "<a href='/editprofile'>" + ICONS["settings"] + "<span>تنظیمات</span></a>"
-        "<a href='/create'>" + ICONS["plus"] + "<span>ساخت</span></a>" +
-        admin +
-        "<a href='/logout'>" + ICONS["logout"] + "<span>خروج</span></a></div>"
-        "<div class='main'><div class='head'>" +
-        room["emoji"] + " " + room["name"] +
-        (" <span class='tick'>✓</span>"
-         if room["username"] == "parto" else "") +
-        "</div><div class='msgs'>" + body +
-        "</div>" + form + "</div></div>"
-    )
-    x.close()
-    return page(html)
-
-
-@app.route("/send/<int:rid>", methods=["POST"])
-def send(rid):
-    u = me()
-    if not u:
-        return redirect("/")
-
-    x = db()
-    room = x.execute(
-        "SELECT * FROM rooms WHERE id=?",
-        (rid,)
-    ).fetchone()
-
-    if not room:
-        x.close()
-        return "اتاق پیدا نشد."
-
-    if room["kind"] == "channel" and room["owner"] != u["username"]:
-        x.close()
-        return "فقط مالک کانال می‌تواند پیام بدهد."
-
-    text = request.form.get("text", "").strip()
-    if text:
-        now = datetime.now().isoformat(timespec="seconds")
-        x.execute(
-            "INSERT INTO messages "
-            "(room,room_id,username,text,created_at,created,reply,edited) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (rid, rid, u["username"], text[:2000],
-             now, now, 0, 0)
-        )
-        x.commit()
-
-    x.close()
-    return redirect("/chat?room=" + str(rid))
-
-
-@app.route("/create", methods=["GET", "POST"])
-def create():
-    u = me()
-    if not u:
-        return redirect("/")
-    if request.method == "GET":
-        return page("""
-        <div class="box">
-            <h2>➕ ساخت گروه یا کانال</h2>
-            <form method="post">
-                <input name="name" placeholder="نام" required>
-                <input name="username" placeholder="آیدی" required>
-                <select name="kind">
-                    <option value="group">👥 گروه</option>
-                    <option value="channel">📢 کانال</option>
-                </select>
-                <select name="emoji">
-                    <option>👥</option><option>📢</option>
-                    <option>⚡</option><option>👻</option>
-                    <option>💻</option><option>🕷️</option>
-                    <option>☠️</option><option>🤖</option>
-                </select>
-                <input name="bio" placeholder="توضیح">
-                <button>ساخت</button>
-            </form>
-        </div>
-        """)
-    x = db()
-    try:
-        x.execute(
-            "INSERT INTO rooms "
-            "(name,username,kind,owner,emoji,bio) "
-            "VALUES(?,?,?,?,?,?)",
-            (request.form["name"][:80],
-             request.form["username"][:40],
-             request.form["kind"], u["username"],
-             request.form["emoji"], request.form["bio"][:200])
-        )
-        x.commit()
-    except sqlite3.IntegrityError:
-        x.close()
-        return "این آیدی قبلاً استفاده شده."
-    x.close()
-    return redirect("/chat")
-
-
-@app.route("/reply/<int:mid>", methods=["GET", "POST"])
-def reply(mid):
-    u = me()
-    if not u:
-        return redirect("/")
-    x = db()
-    m = x.execute(
-        "SELECT * FROM messages WHERE id=?",
-        (mid,)
-    ).fetchone()
-    if not m:
-        x.close()
-        return "پیام پیدا نشد."
-    if request.method == "GET":
-        html = (
-            "<div class='box'><h2>↩️ پاسخ</h2>"
-            "<div class='card'>" + m["text"] + "</div>"
-            "<form method='post'>"
-            "<input name='text' placeholder='پاسخ...' required>"
-            "<button>ارسال</button></form></div>"
-        )
-        x.close()
-        return page(html)
-    now = datetime.now().isoformat(timespec="seconds")
-    x.execute(
-        "INSERT INTO messages "
-        "(room,room_id,username,text,created_at,created,reply,edited) "
-        "VALUES(?,?,?,?,?,?,?,?)",
-        (m["room"], m["room"], u["username"],
-         request.form.get("text", "")[:2000],
-         now, now, mid, 0)
-    )
-    x.commit()
-    room = m["room"]
-    x.close()
-    return redirect("/chat?room=" + str(room))
-
-
-@app.route("/edit/<int:mid>", methods=["GET", "POST"])
-def edit(mid):
-    u = me()
-    if not u:
-        return redirect("/")
-    x = db()
-    m = x.execute(
-        "SELECT * FROM messages WHERE id=?",
-        (mid,)
-    ).fetchone()
-    if not m:
-        x.close()
-        return "پیام پیدا نشد."
-    if m["username"] != u["username"] and not u["admin"]:
-        x.close()
-        return "اجازه ویرایش ندارید."
-    if request.method == "GET":
-        html = (
-            "<div class='box'><h2>✏️ ویرایش</h2>"
-            "<form method='post'>"
-            "<input name='text' value='" + m["text"] + "' required>"
-            "<button>ذخیره</button></form></div>"
-        )
-        x.close()
-        return page(html)
-    x.execute(
-        "UPDATE messages SET text=?,edited=1 WHERE id=?",
-        (request.form["text"][:2000], mid)
-    )
-    x.commit()
-    room = m["room"]
-    x.close()
-    return redirect("/chat?room=" + str(room))
-
-
-@app.route("/delete/<int:mid>")
-def delete(mid):
-    u = me()
-    if not u:
-        return redirect("/")
-    x = db()
-    m = x.execute(
-        "SELECT * FROM messages WHERE id=?",
-        (mid,)
-    ).fetchone()
-    if not m:
-        x.close()
-        return "پیام پیدا نشد."
-    if m["username"] != u["username"] and not u["admin"]:
-        x.close()
-        return "اجازه حذف ندارید."
-    room = m["room"]
-    x.execute(
-        "DELETE FROM messages WHERE id=?",
-        (mid,)
-    )
-    x.commit()
-    x.close()
-    return redirect("/chat?room=" + str(room))
-
-
-@app.route("/admin")
-def admin():
-    u = me()
-    if not u or not u["admin"]:
-        return "دسترسی غیرمجاز."
-    x = db()
-    users = x.execute(
-        "SELECT * FROM users ORDER BY id DESC"
-    ).fetchall()
-    rooms = x.execute(
-        "SELECT * FROM rooms ORDER BY id DESC"
-    ).fetchall()
-    html = "<div class='box'><h2>👑 کاربران</h2>"
-    for z in users:
-        status = "🚫 بن" if z["banned"] else "✅ فعال"
-        html += (
-            "<div class='card'>" + z["emoji"] +
-            " @" + z["username"] + "<br>" + status +
-            "<br><a href='/ban/" + str(z["id"]) +
-            "'>تغییر وضعیت</a></div>"
-        )
-    html += "</div><div class='box'><h2>📢 اتاق‌ها</h2>"
-    for r in rooms:
-        html += (
-            "<div class='card'>" + r["emoji"] + " " +
-            r["name"] + "<br>@" + r["username"] +
-            "<br>مالک: @" + r["owner"] + "</div>"
-        )
-    html += "</div>"
-    x.close()
-    return page(html)
-
-
-@app.route("/ban/<int:uid>")
-def ban(uid):
-    u = me()
-    if not u or not u["admin"]:
-        return "دسترسی غیرمجاز."
-    x = db()
-    z = x.execute(
-        "SELECT * FROM users WHERE id=?",
-        (uid,)
-    ).fetchone()
-    if z and z["username"] != "parto":
-        value = 0 if z["banned"] else 1
-        x.execute(
-            "UPDATE users SET banned=? WHERE id=?",
-            (value, uid)
-        )
-        x.commit()
-    x.close()
-    return redirect("/admin")
-
-
-init_db()
 
 if __name__ == "__main__":
-    print("PARTO STARTED")
-    print("http://127.0.0.1:8080")
     app.run(
         host="0.0.0.0",
-        port=8080,
+        port=5000,
         debug=False
     )
