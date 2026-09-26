@@ -570,7 +570,7 @@ def _render_post(m, u, modal=True):
     card=f"""<article class='post-card' data-post='{m['id']}' oncontextmenu='focusPost(event,this)' ontouchstart='startHold(event,this)' ontouchend='cancelHold(this)' ontouchmove='cancelHold(this)'>
     <div class='post-head'>{av}<div class='post-author'><a href='/profile/{esc(m['author_username'])}'><b>{esc(m['author_name'])}</b>{badge}{pro}{trend}</a><div class='sub'>@{esc(m['author_username'])} · {esc(m.get('created_at',''))}</div></div><button class='more-btn' onclick='focusPost(event,this.closest("article"))'>•••</button></div>
     <div class='post-text'>{esc(m['text'])}{' <span class="edited">ویرایش شد</span>' if m['edited'] else ''}</div>{media}
-    <div class='post-actions'><form method='post' action='/post/like/{m['id']}'><button title='لایک'>{like_label} <span>{m['likes']}</span></button></form><a href='/post/{m['id']}/comments'>♡ <span>{m['comments']}</span></a><form method='post' action='/post/bookmark/{m['id']}'><button title='ذخیره'>{save_label}</button></form><button onclick='focusPost(event,this.closest("article"))' title='تمرکز'>⤢</button>{owner_actions}</div>
+    <div class='post-actions'><form method='post' action='/post/like/{m['id']}'><button title='لایک'>{like_label} <span>{m['likes']}</span></button></form><a href='/post/{m['id']}/comments'>⌘<span>{m['comments']}</span></a><form method='post' action='/post/bookmark/{m['id']}'><button title='ذخیره'>{save_label}</button></form><button onclick='focusPost(event,this.closest("article"))' title='تمرکز'>⤢</button>{owner_actions}</div>
     </article>"""
     return card
 
