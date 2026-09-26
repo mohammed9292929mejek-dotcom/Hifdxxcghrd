@@ -565,7 +565,7 @@ def _render_post(m, u, modal=True):
     owner_actions=''
     if m['username']==u['username'] or is_admin(u):
         owner_actions=f"<a class='post-more' href='/post/edit/{m['id']}'>ویرایش</a><form style='display:inline' method='post' action='/post/delete/{m['id']}'><button class='post-more danger'>حذف</button></form>"
-    like_label='♥' if m['liked'] else '♡'; save_label='★' if m['bookmarked'] else '☆'
+    like_label='✦' if m['liked'] else '✧'; save_label='★' if m['bookmarked'] else '☆'
     trend=' <span class="trend-mark">ترند</span>' if m.get('admin_trending') else ''
     card=f"""<article class='post-card' data-post='{m['id']}' oncontextmenu='focusPost(event,this)' ontouchstart='startHold(event,this)' ontouchend='cancelHold(this)' ontouchmove='cancelHold(this)'>
     <div class='post-head'>{av}<div class='post-author'><a href='/profile/{esc(m['author_username'])}'><b>{esc(m['author_name'])}</b>{badge}{pro}{trend}</a><div class='sub'>@{esc(m['author_username'])} · {esc(m.get('created_at',''))}</div></div><button class='more-btn' onclick='focusPost(event,this.closest("article"))'>•••</button></div>
